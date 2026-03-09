@@ -1,117 +1,132 @@
-# feishu-app-setup — 飞书开放平台应用自动化配置
+---
+name: feishu-app-setup
+description: 在飞书开放平台自动创建和配置企业自建应用（机器人能力、权限、事件订阅、版本发布），用于 OpenClaw 多 agent 部署。Use when the user needs to create Feishu apps, configure bot permissions, set up event subscriptions, or publish app versions on open.feishu.cn.
+homepage: https://github.com/evan966890/feishu-app-setup
+allowed-tools: Bash(agent-browser:*), Read, Write
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "🐦",
+        "requires": { "bins": ["agent-browser"] },
+      },
+  }
+---
 
-> 用 agent-browser 自动完成飞书企业自建应用的创建、权限配置、事件订阅、改名和版本发布。
+# 飞书开放平台应用自动配置
 
-在飞书开放平台上配置一个 OpenClaw bot 应用需要大量重复的点击操作。这个技能把整个流程自动化了：创建应用、添加机器人能力、批量导入权限、配置事件订阅、修改应用名称、发布版本——全部通过 `agent-browser` 在浏览器中自动完成。
+通过 agent-browser 自动化完成飞书企业自建应用的创建和全套配置。
+
+## 使用场景
+
+- 为 OpenClaw agent 创建对应的飞书机器人应用
+- 批量配置应用权限、事件订阅
+- 发布应用版本上线
 
 ## 前置条件
 
-- 已安装 `agent-browser` 技能
-- 已登录飞书开放平台（https://open.feishu.cn）
-- OpenClaw Gateway 正在运行（事件订阅需要活跃的 WebSocket 连接）
-- **`.feishu.cn` 和 `.larksuite.com` 必须在 NO_PROXY 中**（见下方「代理配置」）
-
-## 代理配置（关键！）
-
-飞书是国内服务，**不能走代理**。如果 Gateway plist 配置了 HTTP_PROXY/HTTPS_PROXY，必须把飞书域名加入 NO_PROXY：
-
-```xml
-<key>NO_PROXY</key>
-<string>...,.feishu.cn,.larksuite.com</string>
-<key>no_proxy</key>
-<string>...,.feishu.cn,.larksuite.com</string>
-```
-
-**不加会怎样**：xray 代理把 HTTPS 请求当 HTTP 转发，飞书返回 `400 The plain HTTP request was sent to HTTPS port`。Gateway 的 WebSocket 连不上，导致：
-1. 飞书控制台保存订阅方式失败（检测不到活跃连接）
-2. 「添加事件」按钮始终 disabled
-3. bot 聊天窗口没有消息输入框
-
-修改 plist 后必须 bootout + bootstrap 重启 Gateway（不能只 stop/start，因为 plist env 不会重新加载）：
+1. 用户已在浏览器登录飞书开放平台（需扫码，无法自动化）
+2. `agent-browser` 可用（headed 模式扫码后可切回 headless）
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
-sleep 3
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
-```
-
-## 连接浏览器
-
-### 方式一：连接已有浏览器（推荐）
-
-OpenClaw Gateway 运行时通常已启动 Chrome debug 实例。直接连接已登录的浏览器，无需重新登录：
-
-```bash
-# 先读取当前 CDP 端口（可能变化）
-CDP_PORT=$(cat ~/.chrome-crawl/cdp-port)
-agent-browser connect $CDP_PORT
-agent-browser open "https://open.feishu.cn/app"
-```
-
-**注意**：CDP 端口不固定，Chrome 重启后可能从 9222 变为 9223。始终从 `~/.chrome-crawl/cdp-port` 读取。
-
-**优势**：无需扫码登录，直接可用。适合批量操作。
-
-### 方式二：启动新浏览器
-
-```bash
+# 首次登录（需要用户扫码）
 agent-browser --headed open "https://open.feishu.cn/app"
-# 用户扫码登录后，后续操作均可自动化
+# 等待用户确认登录后，后续操作自动化
 ```
 
 ## 完整配置流程
 
 ```
-代理检查 → 创建应用 → 添加机器人能力 → 权限导入 → OpenClaw 配置 → 重启 Gateway → 事件订阅 → 改名（可选）→ 版本发布 → 配对审批
+创建应用 → 添加机器人 → 批量导入权限 → 发布v1(权限生效)
+  → OpenClaw配置凭证 → 重启Gateway(建立WebSocket)
+  → 事件订阅(长连接) → 发布v2(事件生效) → 配对审批
 ```
 
-**注意顺序**：OpenClaw 配置和 Gateway 重启必须在事件订阅之前，否则飞书检测不到活跃 WebSocket，保存订阅方式会失败。
+> **注意**：新应用必须先发布一版才能获取 token、建立 WebSocket。事件订阅需在第二版发布。
 
 ---
 
-## Step 1: 创建应用
+## Phase 1: 创建应用
+
+### 1.1 点击创建
 
 ```bash
+agent-browser open "https://open.feishu.cn/app"
+sleep 3
 agent-browser find role button click --name "创建企业自建应用"
 sleep 2
 ```
 
-### 填写表单（React 受控组件）
+### 1.2 填写表单
 
-飞书开放平台使用 React。`agent-browser fill @ref` 通常可以正常工作，但在 fill 失败时需要回退到原生 setter：
+使用 snapshot ref 定位输入框（比 CSS 选择器更可靠）：
+
+```bash
+agent-browser snapshot -i  # 找到 modal 中的 textbox ref
+```
+
+**推荐方式**：`fill` 对飞书的 React 受控组件经常不生效，用 `click + keyboard type` 更可靠：
+
+```bash
+agent-browser click @eXX   # 先聚焦输入框
+agent-browser keyboard type "应用名称"
+
+agent-browser click @eYY   # 下一个输入框
+agent-browser keyboard type "应用描述"
+```
+
+**React 兼容回退**：如果 `keyboard type` 也不行，用原生 setter：
 
 ```javascript
-// React 受控 input 的可靠填写方式
+// input
 const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-s.call(inputElement, '目标值');
-inputElement.dispatchEvent(new Event('input', {bubbles: true}));
+s.call(inputEl, '值');
+inputEl.dispatchEvent(new Event('input', {bubbles: true}));
+
+// textarea
+const ts = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+ts.call(textareaEl, '值');
+textareaEl.dispatchEvent(new Event('input', {bubbles: true}));
 ```
 
-### 提取凭证
+### 1.3 提取凭证
 
 ```javascript
-// App ID
+// App ID（页面文本中搜索）
 const m = document.body.innerText.match(/cli_[a-f0-9]+/);
-// App Secret — 先点眼睛图标显示
-const eyeBtn = document.querySelectorAll('[data-icon="VisibleOutlined"]');
+
+// App Secret — 通过 data-icon 区分 3 个图标按钮
+// CopyOutlined=复制  VisibleOutlined=显示  RefreshOutlined=重置(⚠️别点!)
 ```
 
-**注意**: App Secret 旁边有 3 个图标按钮：复制(CopyOutlined)、显示(VisibleOutlined)、重置(RefreshOutlined)。**千万别点重置**。
+> **⚠️ App Secret `I` vs `l` 陷阱**：飞书字体中大写 `I` 和小写 `l` 几乎无法区分！
+> **必须用 CopyOutlined 按钮复制**，不要肉眼读取或从截图中辨认。
+> 可用 API 验证凭证是否正确：
+> ```bash
+> curl -s -X POST 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal' \
+>   -H 'Content-Type: application/json' \
+>   -d '{"app_id":"cli_xxx","app_secret":"yyy"}'
+> # code=0 表示正确，code=10014 表示 secret 错误
+> ```
 
-## Step 2: 添加机器人能力
+### 1.4 添加机器人能力
 
 ```bash
 agent-browser find text "添加应用能力" click
 sleep 2
+# 第一个"添加"按钮通常是机器人
 agent-browser eval "
-  const btns = [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === '+ 添加' || b.textContent.trim() === '添加');
+  const btns = [...document.querySelectorAll('button')].filter(b =>
+    b.textContent.trim() === '+ 添加' || b.textContent.trim() === '添加');
   if (btns[0]) btns[0].click();
 "
 ```
 
-## Step 3: 权限批量导入
+---
 
-### 推荐权限集（OpenClaw 完整权限）
+## Phase 2: 批量导入权限
+
+### 2.1 OpenClaw 必需权限集
 
 ```json
 {
@@ -122,9 +137,7 @@ agent-browser eval "
       "im:message:readonly",
       "im:message.p2p_msg:readonly",
       "im:message.group_at_msg:readonly",
-      "im:message.group_msg",
       "im:resource",
-      "im:chat",
       "im:chat.members:bot_access",
       "im:chat.access_event.bot_p2p_chat:read",
       "contact:user.employee_id:readonly",
@@ -135,13 +148,7 @@ agent-browser eval "
       "event:ip_list",
       "aily:file:read",
       "aily:file:write",
-      "corehr:file:download",
-      "docs:document.content:read",
-      "docx:document",
-      "drive:drive",
-      "cardkit:card:write",
-      "sheets:spreadsheet",
-      "wiki:wiki:readonly"
+      "corehr:file:download"
     ],
     "user": [
       "aily:file:read",
@@ -152,28 +159,32 @@ agent-browser eval "
 }
 ```
 
-**必须包含的权限**：
-- `contact:contact.base:readonly` — 否则 agent 无法读取用户信息
-- `im:message:send_as_bot` — 否则 bot 无法发消息
-- `im:chat` — 否则无法获取会话信息
-- `docx:document` + `drive:drive` — 文档和云盘操作（pipeline 同步需要）
+> **`contact:contact.base:readonly` 必须包含！** 缺少会导致 agent 运行时报权限不足、无法读取用户信息。
 
-### 操作步骤
+### 2.2 通过 Monaco 编辑器粘贴
+
+飞书权限页面的批量导入用的是 Monaco 编辑器，不能用普通 fill，必须用 **ClipboardEvent paste**：
 
 ```bash
 # 点击"批量导入/导出权限"
-agent-browser snapshot -i | grep '批量'
-agent-browser click @eXX
+BATCH_REF=$(agent-browser snapshot -i 2>&1 | grep '批量' | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$BATCH_REF
 sleep 2
 
-# Monaco 编辑器填写：全选 → 粘贴
+# 先点"恢复默认值"清空 Monaco（如果有旧内容，直接粘贴可能追加而非替换）
+agent-browser eval "
+  const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('恢复默认值'));
+  if (btn) btn.click();
+"
+sleep 1
+
+# 聚焦 Monaco → 全选 → 粘贴
 agent-browser eval "document.querySelector('.monaco-editor textarea').focus()"
+sleep 0.5
 agent-browser press Meta+a
 sleep 0.3
-
-# 用 ClipboardEvent 粘贴（Monaco 不支持普通 fill）
 agent-browser eval "
-  const json = JSON.stringify(PERM_JSON, null, 2);
+  const json = JSON.stringify(PERM_OBJ, null, 2);
   const ta = document.querySelector('.monaco-editor textarea');
   const dt = new DataTransfer();
   dt.setData('text/plain', json);
@@ -181,170 +192,136 @@ agent-browser eval "
 "
 sleep 1
 
-# 点击"下一步，确认新增权限" → "申请开通"
+# 下一步 → 申请开通
+NEXT_REF=$(agent-browser snapshot -i 2>&1 | grep '确认新增权限' | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$NEXT_REF
+sleep 2
+agent-browser eval "
+  const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('申请开通'));
+  if (btn) btn.click();
+"
+sleep 2
+
+# 数据范围确认（部分权限会弹窗）
+agent-browser eval "
+  const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '确认');
+  if (btn) btn.click();
+"
 ```
 
-部分权限（如通讯录相关）会弹出"数据范围"确认对话框，需要额外点击"确认"。
+---
 
-## Step 4: 事件订阅（长连接 WebSocket）
+## Phase 3: 事件订阅（WebSocket 长连接）
 
-### 为什么事件订阅如此重要
+### ⚠️ 关键前置条件
 
-**没有 `im.message.receive_v1` 事件订阅 = 飞书聊天窗口没有消息输入框。** 用户看到的症状是能搜到 bot 但无法发消息。
+飞书要求保存长连接订阅方式时，**必须已有活跃的 WebSocket 连接**。否则报错：
 
-### 先决条件：三件事必须先完成
-
-飞书有个鸡生蛋的问题：保存长连接订阅方式时，飞书会检查是否已有活跃的 WebSocket 连接。**正确顺序**：
-
-1. **NO_PROXY 加 `.feishu.cn`**（见上方「代理配置」）— 否则 WebSocket 400 错误
-2. 在 `openclaw.json` 配置应用凭证（账号名必须叫 `default`）
-3. `launchctl bootout + bootstrap` 重启 Gateway，确认日志出现 `[ws] ws client ready`
-
-**验证 WebSocket 已连通**：
-```bash
-tail -20 ~/.openclaw/logs/gateway.log | grep -i 'ws client ready'
-# 必须看到: [ws] ws client ready
+```
+code: 10068, msg: "应用未建立长连接"
 ```
 
-如果看到 `Request failed with status code 400` 或 `The plain HTTP request was sent to HTTPS port`，说明代理没配对，回去检查 NO_PROXY。
+**正确顺序**：
+1. 先在 openclaw.json 配好应用凭证
+2. 重启 Gateway 建立连接
+3. 然后回来保存订阅方式
 
-否则会报错：`code: 10068, msg: "应用未建立长连接"`
+### ⚠️ 新应用的鸡生蛋问题
 
-### 配置订阅方式
+新创建的应用（未发布过），SDK **无法获取 `tenant_access_token`**，导致 WebSocket 连不上、事件订阅保存静默失败。
+
+**正确的首次配置流程**：
+1. 创建应用 → 添加机器人 → 批量导入权限
+2. **先发布 v1.0.0**（只含权限，不配事件订阅）
+3. 在 openclaw.json 配好凭证 → 重启 Gateway（此时才能获取 token + 建 WebSocket）
+4. 回到飞书 → 配置事件订阅（长连接 + im.message.receive_v1）
+5. **再发布 v1.0.1**（含事件订阅变更）
+
+> **静默失败特征**：点"保存"后按钮不消失（保存/取消仍在），无 toast 报错。
+> 如果发现保存后页面无变化，大概率是 WebSocket 未建立。
+
+### 3.1 配置订阅方式
 
 ```bash
 agent-browser open "https://open.feishu.cn/app/$APP_ID/event"
 sleep 4
+agent-browser eval "document.querySelector('.app-layout__main').scrollTo(0, 500)"
+sleep 1
 
-# 点「订阅方式」按钮展开选项
-agent-browser snapshot -i | grep '订阅方式'
-agent-browser click @eXX
-sleep 2
+# 点铅笔编辑图标
+SUB_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "订阅方式"' | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$SUB_REF
+sleep 1
 
-# 长连接默认选中（radio checked），直接点保存
-agent-browser snapshot -i | grep '保存'
-agent-browser click @eXX   # 点「保存」按钮
+# 长连接默认选中，直接保存
+SAVE_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "保存"' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$SAVE_REF
 sleep 3
-
-# 验证：保存成功后「添加事件」按钮变为可点击（不再 disabled）
-agent-browser snapshot -i | grep '添加事件'
-# 如果仍显示 [disabled]，说明 WebSocket 未连通，检查 Gateway 日志
 ```
 
-### 添加事件
+### 3.2 添加 im.message.receive_v1 事件
+
+**必须用搜索框精确查找！** 不要通过分类浏览——列表很长容易选错。
 
 ```bash
-# 点「添加事件」（保存订阅方式后才可点击）
-agent-browser snapshot -i | grep '添加事件'
-agent-browser click @eXX
+# 点"添加事件"（订阅方式配好后才不是 disabled）
+ADD_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "添加事件"' | grep -v disabled | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$ADD_REF
 sleep 2
 
-# 用搜索框精确查找（避免在分类列表中翻找选错）
-agent-browser snapshot -i | grep 'textbox.*nth=1'
-agent-browser fill @eXX "im.message.receive_v1"
+# 搜索（nth=1 的 textbox 是 modal 内搜索框）
+SEARCH_REF=$(agent-browser snapshot -i 2>&1 | grep 'textbox.*nth=1' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser fill @$SEARCH_REF "im.message.receive_v1"
 sleep 2
 
-# 勾选搜索结果（checkbox）
-agent-browser snapshot -i | grep 'checkbox'
-agent-browser check @eXX
+# 勾选唯一结果
+CB_REF=$(agent-browser snapshot -i 2>&1 | grep 'checkbox' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$CB_REF
 sleep 1
 
-# 确认添加（checkbox 勾选后按钮才可点击）
-agent-browser snapshot -i | grep '确认添加'
-agent-browser click @eXX
+# 确认
+CONFIRM_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "确认添加"' | grep -v disabled | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$CONFIRM_REF
 sleep 2
-
-# 验证：页面出现「接收消息」链接 + 「删除事件」按钮
-agent-browser snapshot -i | grep '接收消息'
 ```
 
-## Step 5: 应用改名
+---
 
-应用名称在 **基础信息 → 国际化配置** 中修改：
+## Phase 4: 版本发布
+
+每次修改权限或事件后，**必须发布新版本才能生效**。
 
 ```bash
-agent-browser open "https://open.feishu.cn/app/$APP_ID/baseinfo"
+# 点"创建版本"
+CREATE_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "创建版本"' | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$CREATE_REF
 sleep 3
 
-# 滚动到"国际化配置"区域
-agent-browser eval "document.querySelector('.app-layout__main').scrollTo(0, 1000)"
-sleep 1
+# 填写（nth=1 是版本号，更新日志是 textarea ref）
+VER_REF=$(agent-browser snapshot -i 2>&1 | grep 'textbox.*nth=1' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser fill @$VER_REF "1.0.0"
 
-# 点击编辑铅笔图标
-agent-browser snapshot -i | grep 'EditOutlined\|编辑'
-agent-browser click @eXX
-sleep 2
-
-# 清除旧名称并填写新名称
-agent-browser snapshot -i | grep 'textbox'
-agent-browser fill @eXX "新名称"
-sleep 1
+NOTES_REF=$(agent-browser snapshot -i 2>&1 | grep 'textbox.*更新日志' | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser fill @$NOTES_REF "初始版本 - 添加机器人消息接收事件"
 
 # 保存
-agent-browser find role button click --name "保存"
-sleep 2
-```
-
-**注意**：改名后必须创建新版本并发布，新名字才会在飞书聊天中生效。
-
-### 批量改名
-
-```bash
-APP_IDS=("cli_xxx1" "cli_xxx2" "cli_xxx3")
-NAMES=("名字1" "名字2" "名字3")
-
-for i in "${!APP_IDS[@]}"; do
-  agent-browser open "https://open.feishu.cn/app/${APP_IDS[$i]}/baseinfo"
-  sleep 3
-  # 编辑国际化配置 → 填写新名称 → 保存
-done
-```
-
-## Step 6: 版本发布
-
-添加事件后页面顶部会出现「创建版本」按钮。**必须发布新版本，事件订阅才生效。**
-
-```bash
-# 点「创建版本」（页面顶部横幅中的按钮）
-agent-browser snapshot -i | grep '创建版本'
-agent-browser click @eXX
+SAVE_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "保存"' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$SAVE_REF
 sleep 3
 
-# 填写版本号（必填，placeholder 显示上一版本号）
-agent-browser snapshot -i | grep 'textbox.*nth=1'
-agent-browser fill @eXX "1.2.0"
-
-# 填写更新说明
-agent-browser snapshot -i | grep '此内容将于'
-agent-browser fill @eXX "添加事件订阅：接收消息"
-
-# 保存版本
-agent-browser snapshot -i | grep '保存'
-agent-browser click @eXX
+# 确认发布（个人版免审，自动上线）
+# ⚠️ 页面有两个"确认发布"按钮：右上角(ref=eXX) + 弹窗内(ref=eYY, nth=1)
+# 必须点弹窗内的那个
+CONFIRM_REF=$(agent-browser snapshot -i 2>&1 | grep 'button "确认发布".*nth=1' | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+agent-browser click @$CONFIRM_REF
 sleep 3
-
-# 保存后出现「确认发布」按钮（可能有两个：页面上和弹窗中）
-# 点弹窗中的那个（nth=1）
-agent-browser snapshot -i | grep '确认发布'
-agent-browser click @eXX   # 选 nth=1 的按钮
-sleep 3
-
-# 验证：页面显示「当前修改均已发布」（绿色勾）+ 版本状态「已发布」
 ```
 
-### 发布注意事项
+---
 
-- 飞书个人版企业自建应用**免审核**，提交即上线
-- **版本号必须手动填写**，不会自动递增
-- 发布前可能需要确认**数据权限范围**（如"飞书人事"相关权限需设为"全部"）
-- 发布成功后状态显示 **"已发布"** + **"当前修改均已发布"**
-- 改名 + 发布通常配合进行，流程：**改名 → 保存 → 创建版本 → 发布**
+## Phase 5: OpenClaw 多账号配置
 
-## Step 7: OpenClaw 配置
-
-**重要**：此步骤必须在事件订阅（Step 4）之前完成，因为 Gateway 需要先建立 WebSocket 连接。
-
-### 单账号配置
+### 5.1 openclaw.json 格式
 
 ```json
 {
@@ -352,114 +329,77 @@ sleep 3
     "feishu": {
       "enabled": true,
       "accounts": {
-        "default": {
-          "appId": "cli_xxx",
-          "appSecret": "xxx",
-          "name": "Studio一号"
-        }
-      }
-    }
-  }
-}
-```
-
-**账号名必须叫 `default`**。如果用其他名字（如 `main`、`studio1`），Gateway 会报错：
-`accounts.default is missing and no valid account-scoped binding exists`
-
-### 多账号配置
-
-```json
-{
-  "channels": {
-    "feishu": {
-      "enabled": true,
-      "accounts": {
-        "default": { "appId": "cli_xxx", "appSecret": "xxx", "name": "主助手" },
-        "agent2": { "appId": "cli_yyy", "appSecret": "yyy", "name": "助手2" }
+        "main": { "appId": "cli_xxx", "appSecret": "xxx", "name": "显示名" },
+        "agent2": { "appId": "cli_yyy", "appSecret": "yyy", "name": "显示名" }
       }
     }
   },
   "bindings": [
-    { "agentId": "main", "match": { "channel": "feishu", "accountId": "default" } },
+    { "agentId": "main", "match": { "channel": "feishu", "accountId": "main" } },
     { "agentId": "agent2", "match": { "channel": "feishu", "accountId": "agent2" } }
   ]
 }
 ```
 
-### Gateway plist 环境变量
-
-在 `~/Library/LaunchAgents/ai.openclaw.gateway.plist` 的 `EnvironmentVariables` 中添加：
-
-```xml
-<key>FEISHU_APP_ID</key>
-<string>cli_xxx</string>
-<key>FEISHU_APP_SECRET</key>
-<string>xxx</string>
-```
-
-### 重启 Gateway
-
-修改 plist 后必须 bootout + bootstrap（不能只 stop/start）：
+### 5.2 重启验证
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
-sleep 3
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
+launchctl stop ai.openclaw.gateway && sleep 3 && launchctl start ai.openclaw.gateway
+# 检查日志确认所有 account 状态为 running + works
 ```
 
-**验证**：
+### 5.3 配对审批
+
+用户首次给 bot 发消息会触发配对：
+
 ```bash
-# 检查 WebSocket 是否连通
-tail -30 ~/.openclaw/logs/gateway.log | grep -E 'feishu|ws client'
-# 期望看到: [feishu] feishu[default]: WebSocket client started
-# 期望看到: [ws] ws client ready
+openclaw pairing approve feishu <PAIRING_CODE>
 ```
 
-## Step 8: 配对审批
+每个用户对每个 bot 需单独配对一次。
 
-用户首次给 bot 发消息时，OpenClaw 返回配对请求。每个用户对每个 bot 需要单独配对一次。
+---
 
-```bash
-openclaw pairing approve feishu <配对码>
-```
+## 批量操作模板
 
-## 操作模式：snapshot + ref
-
-所有操作的核心模式：用 `agent-browser snapshot -i` 获取页面元素 ref，用 `grep` 提取，再用 ref 操作。比 JS 选择器更可靠。
+### 提取 ref 的标准模式
 
 ```bash
-REF=$(agent-browser snapshot -i 2>&1 | grep 'button "保存"' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
+REF=$(agent-browser snapshot -i 2>&1 | grep 'button "目标文字"' | head -1 | grep -o 'ref=e[0-9]*' | sed 's/ref=//')
 if [ -n "$REF" ]; then
   agent-browser click @$REF
 fi
 ```
 
-## 踩坑记录
+### 批量配置多个应用
 
-| 问题 | 原因 | 解决 |
+```bash
+APPS="cli_xxx:name1 cli_yyy:name2 cli_zzz:name3"
+for APP in $APPS; do
+  APP_ID="${APP%%:*}"
+  APP_NAME="${APP##*:}"
+  # ... 对每个 app 执行配置步骤
+done
+```
+
+---
+
+## 踩坑速查
+
+| 症状 | 原因 | 解决 |
 |------|------|------|
-| **WebSocket 400 错误** | `.feishu.cn` 不在 NO_PROXY 中，代理把 HTTPS 当 HTTP 转发 | 在 plist NO_PROXY 和 no_proxy 中加 `.feishu.cn,.larksuite.com`，然后 bootout+bootstrap |
-| **bot 聊天没有输入框** | 没有配置 `im.message.receive_v1` 事件订阅 | 完成事件订阅 + 发布新版本 |
-| **「添加事件」按钮 disabled** | 订阅方式未保存（WebSocket 未连通） | 先修代理 → 重启 Gateway → 确认 ws client ready → 再保存 |
-| 保存订阅方式报 10068 | Gateway 未连接 | 先配 openclaw.json → 加 NO_PROXY → bootout+bootstrap → 再保存 |
-| **OpenClaw 账号名报错** | 账号名不叫 `default` | `accounts` 中第一个账号必须叫 `default`，不能用 `main`/`studio1` |
-| **plist 修改后 stop/start 无效** | launchctl stop/start 不重新加载 plist | 必须 `bootout` + `bootstrap` |
-| 添加事件选错 | 分类列表太长 | 用搜索框精确搜索 `im.message.receive_v1` |
-| React input fill 无效 | 受控组件问题 | 用原生 setter + dispatchEvent |
-| Monaco 编辑器无法 fill | 非标准 input | 用 ClipboardEvent paste |
-| 权限不足报错 | 缺 `contact:contact.base:readonly` | 加到权限 JSON 中 |
-| 权限变更后仍报错 | 需要新版本 | 权限变更后必须发布新版本 |
-| 点错 App Secret 重置 | 3 个图标难区分 | 用 `data-icon` 属性区分 |
-| snapshot ref 失效 | daemon busy | `sleep 2` 后重试 |
-| **CDP 端口变化** | Chrome 重启后端口可能变 | 始终从 `~/.chrome-crawl/cdp-port` 读取，不要硬编码 |
-| 新浏览器打不开飞书 | 需要扫码登录 | 用 `connect $CDP_PORT` 连接已登录浏览器 |
-| 改名后不生效 | 未发布版本 | 改名 → 保存 → 创建版本 → 发布 |
-| 发布要求确认数据范围 | 部分权限需选范围 | 如"飞书人事"权限选"全部" |
-| agent-browser launch 失败 | 需要 raw mode | 用 `connect $CDP_PORT` 连接已有浏览器 |
-| **版本号不自动递增** | 飞书要求手动填写版本号 | 读 placeholder 中的上一版本号，手动递增 |
-
-## 依赖
-
-- `agent-browser` 技能（用于浏览器自动化）
-- 飞书企业管理员权限（创建自建应用）
-- OpenClaw Gateway（事件订阅需要活跃连接）
+| 保存订阅方式报 10068 | Gateway 未建立 WebSocket | 先配 openclaw.json → 重启 Gateway → 再保存 |
+| 添加事件选错了 | 分类列表太长、名字相似 | **搜索框输入精确 event name** |
+| fill 输入框无效 | React 受控组件 | 用原生 `HTMLInputElement.prototype.value` setter |
+| Monaco 编辑器无法输入 | 非标准 textarea | 用 `ClipboardEvent('paste')` |
+| Agent 报权限不足 | 缺 `contact:contact.base:readonly` | 补充权限 + 发布新版本 |
+| 权限加了但没生效 | 未发布新版本 | 每次改权限/事件后必须创建并发布版本 |
+| App Secret 被重置 | 点了 RefreshOutlined 图标 | 用 `data-icon` 属性区分三个按钮 |
+| App Secret `I`/`l` 混淆 | 飞书字体中大写I和小写l几乎一样 | **必须用 CopyOutlined 复制**，不要肉眼读取；用 API 验证 |
+| snapshot 报 daemon busy | agent-browser 并发限制 | `sleep 2` 后重试 |
+| "添加事件"按钮 disabled | 订阅方式未配置 | 先完成订阅方式配置 |
+| 保存订阅方式静默失败 | WebSocket 未建立（按钮不消失、无 toast） | 确认 gateway 已连接；新 app 需先发布一版再来配 |
+| 新 app "failed to obtain token" | 应用从未发布过，SDK 无法获取 token | 先发布 v1.0.0（只含权限）→ 重启 gateway → 再配事件 |
+| WebSocket "system busy" 1000040345 | 多 app 同时连接触发飞书限流 | 通常自动重连；重启 gateway 并等待 10-15s |
+| 确认发布点了没反应 | 页面有两个"确认发布"按钮 | 用 `nth=1` 的弹窗内按钮，不是右上角那个 |
+| Monaco 粘贴追加而非替换 | 旧内容未清除 | 先点"恢复默认值"清空，再全选+粘贴 |
